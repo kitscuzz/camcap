@@ -167,7 +167,7 @@ static const char* get_pix_fmt(uint32_t fmt) {
 
 int main(int argc, char *argv[]) {
     int fd, ret = 0;
-    fd = open("/dev/video1", O_RDWR);
+    fd = open("/dev/video0", O_RDWR);
     if (fd == -1) {
         perror("Error opening video device");
         ret = -1;
