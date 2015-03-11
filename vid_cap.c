@@ -14,6 +14,13 @@
 
 #include "v4l2_helper.h"
 
+#define BUFFER_COUNT 4
+
+struct mmaped_buffer {
+    void *start;
+    size_t length;
+};
+
 static int xioctl(int fd, int request, void *arg) {
     int ret;
     do {
@@ -105,6 +112,94 @@ static int frame_size_valid(int fd, uint32_t pixel_format, int width, int height
     return valid;
 }
 
+static int set_stream_format(int fd, int width, int height, uint32_t pixel_format) {
+    struct v4l2_format fmt = {0};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = width;
+    fmt.fmt.pix.height = height;
+    fmt.fmt.pix.pixelformat = pixel_format;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+    return xioctl(fd, VIDIOC_S_FMT, &fmt);
+}
+
+static int init_mmap_buffers(int fd, struct mmaped_buffer *bufs, int count) {
+    struct v4l2_requestbuffers req = {0};
+    req.count = count;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+
+    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
+        return -1;
+    }
+
+    struct v4l2_buffer buf;
+    for (int i = 0; i < count; i++) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf)) {
+            return -1;
+        }
+
+        bufs[i].length = buf.length;
+        bufs[i].start = mmap(NULL, buf.length, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, buf.m.offset);
+        if (MAP_FAILED == bufs[i].start) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int start_streaming(int fd, int buf_count) {
+    struct v4l2_buffer buf;
+
+    for (int i = 0; i < buf_count; i++) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+
+        fprintf(stdout, "Starting stream for buf %d\n", i);
+        if (-1 == xioctl(fd, VIDIOC_QBUF, &buf)) {
+            return -1;
+        }
+    }
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    return xioctl(fd, VIDIOC_STREAMON, &type);
+}
+
+static int stop_streaming(int fd) {
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    return xioctl(fd, VIDIOC_STREAMOFF, &type);
+}
+
+static int read_frame(int fd, struct v4l2_buffer *buf) {
+    memset (buf, 0, sizeof(struct v4l2_buffer));
+    buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf->memory = V4L2_MEMORY_MMAP;
+
+    return xioctl(fd, VIDIOC_DQBUF, buf);
+}
+
+static int enqueue_frame(int fd, struct v4l2_buffer *buf) {
+    return xioctl(fd, VIDIOC_QBUF, buf);
+}
+
+void print_usage(const char *argv0) {
+    fprintf(stderr, "Usage: %s --device=/dev/video0 [options]\n\n"
+            "-d | --device  The video capture device to use\n"
+            "-f | --format  The pixel format of the video (YUYV, MJPEG, etc)\n"
+            "-w | --width   The frame width, in pixels\n"
+            "-h | --height  The frame height, in pixels\n"
+            "-c | --count   The number of frames to grab from the camera\n"
+            "-o | --output  The filename to output data to (stdout normally)\n",
+            argv0);
+}
+
 int main(int argc, char *argv[]) {
     int fd = -1, ret = 0;
     static struct option long_options[] = {
@@ -112,18 +207,35 @@ int main(int argc, char *argv[]) {
         {"format", required_argument, 0, 'f' },
         {"width",  required_argument, 0, 'w' },
         {"height", required_argument, 0, 'h' },
+        {"count",  required_argument, 0, 'c' },
         {"output", required_argument, 0, 'o' },
         {0,        0,                 0,  0  }
     };
-    static char options[] = "d:f:w:h:o:";
+    static char options[] = "d:f:w:h:c:o:";
 
     const char *dev_name = NULL;
     const char *out_name = NULL;
     uint32_t pixel_format = 0;
     int width = 0, height = 0;
+    int frame_count = 1;
     int opt;
     while (-1 != (opt = getopt_long(argc, argv, options, long_options, NULL))) {
         switch (opt) {
+            case 'c':
+                if (frame_count == 1) {
+                    char *endptr = NULL;
+                    long parsed = strtol(optarg, &endptr, 0);
+                    if (parsed > INT_MAX || parsed <= 0 || *endptr != '\0') {
+                        fprintf(stderr, "ERROR: Unable to parse given frame count: \"%s\"\n", optarg);
+                    }
+                    frame_count = (int) parsed;
+                } else {
+                    fprintf(stderr, "ERROR: Can only accept 1 frame count per instantiation."
+                            "%d is already the current frame count, cannot accept \"%s\"\n", frame_count, optarg);
+                    return -1;
+                }
+                break;
+
             case 'd':
                 if (dev_name == NULL) {
                     dev_name = optarg;
@@ -191,12 +303,14 @@ int main(int argc, char *argv[]) {
 
             case '?':
             default:
+                print_usage(argv[0]);
                 return -1;
         }
     }
 
     if (dev_name == NULL) {
         fprintf(stderr, "Please provide a valid device name (like /dev/video0)!\n");
+        print_usage(argv[0]);
         return -1;
     }
 
@@ -246,6 +360,12 @@ int main(int argc, char *argv[]) {
         print_capabilities(caps.capabilities);
     }
 
+    if (!(caps.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+        fprintf(stderr, "Error: device does not support video capture!\n");
+        ret = -1;
+        goto fail;
+    }
+
     if (!pixel_format_valid(fd, pixel_format)) {
         goto fail;
     }
@@ -254,100 +374,100 @@ int main(int argc, char *argv[]) {
         goto fail;
     }
 
-    struct v4l2_format fmt = {0};
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = width;
-    fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = pixel_format;
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
-
-    if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
-        perror("Error setting Pixel Format");
+    fprintf(stdout, "Setting stream format\n");
+    if (set_stream_format(fd, width, height, pixel_format) != 0) {
+        perror("Error setting format");
         ret = -1;
         goto fail;
     }
 
-    struct v4l2_requestbuffers req = {0};
-    req.count = 1;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
-
-    fprintf(stdout, "Requesting a buffer\n");
-    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
-        perror("Error requesting buffer");
+    fprintf(stdout, "Mmaping buffers\n");
+    // Initialize all the buffers. We give a few spots so the camera can continue to stream
+    // the next frame while our program processes the previous one.  The number of buffers
+    // should be no less than 2 for streaming, the v4l2 docs example gives 4
+    struct mmaped_buffer bufs[BUFFER_COUNT];
+    if (-1 == init_mmap_buffers(fd, bufs, BUFFER_COUNT)) {
+        perror("Error mmaping buffers");
         ret = -1;
         goto fail;
     }
 
-    struct v4l2_buffer buf = {0};
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
-    buf.index = 0; // bufferindex?
-
-    fprintf(stdout, "Querying buffer\n");
-    if(-1 == xioctl(fd, VIDIOC_QBUF, &buf)) {
-        perror("Error querying Buffer");
+    // Start streaming!
+    if (-1 == start_streaming(fd, BUFFER_COUNT)) {
+        perror("Error starting stream");
         ret = -1;
         goto fail;
     }
 
-    uint8_t *buffer = NULL;
-    fprintf(stdout, "Mmaping buffer\n");
-    buffer = mmap (NULL, buf.length, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, buf.m.offset);
-    if (MAP_FAILED == buffer) {
-        perror("Error mmaping buffer");
-        ret = -1;
-        goto fail;
+    // Select loop while we read frames
+    int cur_frame = 0;
+    while (cur_frame < frame_count) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+
+        struct timeval tv = {0};
+        tv.tv_sec = 2;
+
+        int r = select((fd + 1), &fds, NULL, NULL, &tv);
+        if(-1 == r) {
+            if (EINTR == errno)
+                continue;
+
+            perror("Error waiting for next frame");
+            ret = -1;
+            goto fail;
+        }
+
+        if (0 == r) {
+            fprintf(stderr, "Timeout waiting for next frame\n");
+            ret = -1;
+            goto fail;
+        }
+
+        struct v4l2_buffer buf;
+        if (-1 == read_frame(fd, &buf)) {
+            perror("Error reading frame");
+            ret = -1;
+            goto fail;
+        }
+
+        if (NULL != out) {
+            if (!fwrite((bufs[buf.index].start), buf.bytesused, 1, out)) {
+                perror("Error writing output to file");
+                ret = -1;
+                goto fail;
+            }
+        } else {
+            write(STDOUT_FILENO, bufs[buf.index].start, buf.bytesused);
+        }
+
+        enqueue_frame(fd, &buf);
+
+        fprintf(stdout, "Written frame %d\n", cur_frame);
+        cur_frame++;
     }
 
-    fprintf(stdout, "Turning on streaming\n");
-    if(-1 == xioctl(fd, VIDIOC_STREAMON, &buf.type)) {
-        perror("Error starting capture");
-        ret = -1;
-        goto fail;
-    }
-
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
-    struct timeval tv = {0};
-    tv.tv_sec = 2;
-
-    fprintf(stdout, "Calling select on fd\n");
-    int r = select((fd + 1), &fds, NULL, NULL, &tv);
-    if(-1 == r) {
-        perror("Error waiting for frame");
-        ret = -1;
-        goto fail;
-    }
-
-    fprintf(stdout, "Retrieving frame");
-    if(-1 == xioctl(fd, VIDIOC_DQBUF, &buf)) {
-        perror("Error retrieving frame");
-        ret = -1;
-        goto fail;
-    }
-
-    if (out != NULL) {
-        fwrite(buffer, sizeof(*buffer), buf.length, out);
-    } else {
-        write(STDOUT_FILENO, buffer, buf.length);
+    if(-1 == stop_streaming(fd)) {
+        perror("Error stopping stream");
+        ret = 1;
     }
 
 fail:
-    if (out != NULL) {
-        if (EOF == fclose(out)) {
-            perror("Error closing file");
-        }
+    if ((out != NULL) && (EOF == fclose(out))) {
+        perror("Error closing file");
     }
 
-    if (buffer != NULL && buffer != MAP_FAILED) {
-        munmap(buffer, buf.length);
+    for (int i = 0; i < BUFFER_COUNT; i++) {
+        if (bufs[i].start != NULL && bufs[i].start != MAP_FAILED) {
+            munmap(bufs[i].start, bufs[i].length);
+        }
     }
 
     if ((fd >= 0) && (close(fd) == -1)) {
         perror("Error closing file descriptor");
     }
+    fd = -1;
 
     return ret;
 }
