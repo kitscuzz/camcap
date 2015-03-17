@@ -5,6 +5,7 @@
 #include <errno.h>
 
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <linux/videodev2.h>
 
 #include "v4l2_helper.h"
@@ -94,7 +95,7 @@ static int count_formats (int fd, enum v4l2_buf_type type) {
  * @returns the number of elements in the formats array on sucess
  *          -1 on failure, with errno set appropriately
  */
-int enum_formats(int fd, enum v4l2_buf_type type, struct v4l2_fmtdesc **format) {
+int enum_pixel_formats(int fd, enum v4l2_buf_type type, struct v4l2_fmtdesc **format) {
     if (fd < 0 || format == NULL) {
         errno = EINVAL;
         return -1;
@@ -123,7 +124,21 @@ int enum_formats(int fd, enum v4l2_buf_type type, struct v4l2_fmtdesc **format) 
     return fmt_cnt;
 }
 
-static int get_nth_frame_sz(int fd, int pixel_format, int n, struct v4l2_frmsizeenum *frm_sz_enum) {
+/**
+ * pixel_format_valid - returns a non-zero value if the pixel format is valid
+ */
+int pixel_format_valid(int fd, enum v4l2_buf_type type, uint32_t pixel_format) {
+    struct v4l2_fmtdesc fmt = {0};
+    for(int i = 0; -1 != get_nth_format(fd, type, i, &fmt); i++) {
+        if (fmt.pixelformat == pixel_format) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int get_nth_frame_size(int fd, int pixel_format, int n, struct v4l2_frmsizeenum *frm_sz_enum) {
     frm_sz_enum->index = n;
     frm_sz_enum->pixel_format = pixel_format;
     return xioctl(fd, VIDIOC_ENUM_FRAMESIZES, frm_sz_enum);
@@ -132,7 +147,7 @@ static int get_nth_frame_sz(int fd, int pixel_format, int n, struct v4l2_frmsize
 static int get_framesize_count(int fd, int pixel_format) {
     struct v4l2_frmsizeenum fsze = {0};
     int frm_sz_cnt = 0;
-    while (get_nth_frame_sz(fd, pixel_format, frm_sz_cnt, &fsze) >= 0) {
+    while (get_nth_frame_size(fd, pixel_format, frm_sz_cnt, &fsze) >= 0) {
         frm_sz_cnt++;
     }
 
@@ -143,6 +158,9 @@ static int get_framesize_count(int fd, int pixel_format) {
     return frm_sz_cnt;
 }
 
+/**
+ * enum_frame_sizes - allocate space for a 
+ */
 int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_enum) {
     if (frm_sz_enum == NULL) {
         errno = EINVAL;
@@ -161,8 +179,9 @@ int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_e
     }
 
     for (int i = 0; i < frm_sz_cnt; i++) {
-        if (get_nth_frame_sz(fd, pixel_format, i, &fsze[i]) < 0) {
+        if (get_nth_frame_size(fd, pixel_format, i, &fsze[i]) < 0) {
             free(fsze);
+            fsze = NULL;
             return -1;
         }
     }
@@ -170,5 +189,137 @@ int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_e
     *frm_sz_enum = fsze;
 
     return frm_sz_cnt;
+}
+
+/**
+ * frame_size_valid - returns a non-zero value if the frame size is valid
+ */
+int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
+    // Check to see if the frame size is valid for the given pixel format
+    struct v4l2_frmsizeenum fsze = {0};
+
+    int cur_width, cur_height;
+    for (int i = 0; -1 != get_nth_frame_size(fd, pixel_format, i, &fsze) ; i++) {
+        switch(fsze.type) {
+            case V4L2_FRMSIZE_TYPE_DISCRETE:
+                if (width == fsze.discrete.width && height == fsze.discrete.height) {
+                    return 1;
+                }
+                break;
+
+            case V4L2_FRMSIZE_TYPE_CONTINUOUS:
+                if ((fsze.stepwise.min_width <= width) && (width <= fsze.stepwise.max_width)
+                        && (fsze.stepwise.min_height <= height) && (height <= fsze.stepwise.max_height)) {
+                    return 1;
+                }
+                break;
+
+            case V4L2_FRMSIZE_TYPE_STEPWISE:
+                cur_width = fsze.stepwise.min_width;
+                cur_height = fsze.stepwise.min_height;
+                while ((cur_width <= fsze.stepwise.max_width) && (cur_height <= fsze.stepwise.max_height)) {
+                    if (cur_width == width && cur_height == height) {
+                        return 1;
+                    }
+
+                    cur_width += fsze.stepwise.step_width;
+                    cur_height += fsze.stepwise.step_height;
+                }
+                break;
+
+            default:
+                // This is an unknown type of frame specification. Abort!
+                return 0;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * set_stream_format - apply a given format to a given device
+ */
+int set_stream_format(int fd, struct v4l2_format *fmt) {
+    return xioctl(fd, VIDIOC_S_FMT, fmt);
+}
+
+/**
+ * init_mmap_buffers - get a set of mmaped buffers related between the driver and the program
+ */
+int init_mmap_buffers(int fd, struct mmaped_buffer *bufs, int count) {
+    struct v4l2_requestbuffers req = {0};
+    req.count = count;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+
+    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
+        return -1;
+    }
+
+    struct v4l2_buffer buf;
+    for (int i = 0; i < count; i++) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf)) {
+            return -1;
+        }
+
+        bufs[i].length = buf.length;
+        bufs[i].start = mmap(NULL, buf.length, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, buf.m.offset);
+        if (MAP_FAILED == bufs[i].start) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * start_mmap_streaming - queue all buffers and tell the driver to start
+ */
+int start_mmap_streaming(int fd, int buf_count) {
+    struct v4l2_buffer buf;
+
+    for (int i = 0; i < buf_count; i++) {
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+
+        if (-1 == xioctl(fd, VIDIOC_QBUF, &buf)) {
+            return -1;
+        }
+    }
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    return xioctl(fd, VIDIOC_STREAMON, &type);
+}
+
+/**
+ * stop_streaming - tell the driver to stop streaming
+ */
+int stop_streaming(int fd) {
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    return xioctl(fd, VIDIOC_STREAMOFF, &type);
+}
+
+/**
+ * read_frame - after sucessfully returning from a select, get the data from the buffer
+ */
+int read_frame(int fd, struct v4l2_buffer *buf) {
+    memset (buf, 0, sizeof(struct v4l2_buffer));
+    buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf->memory = V4L2_MEMORY_MMAP;
+
+    return xioctl(fd, VIDIOC_DQBUF, buf);
+}
+
+/**
+ * enqueue_frame - tell the driver the buffer is ready to accept another frame
+ */
+int enqueue_frame(int fd, struct v4l2_buffer *buf) {
+    return xioctl(fd, VIDIOC_QBUF, buf);
 }
 

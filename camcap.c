@@ -16,11 +16,6 @@
 
 #define BUFFER_COUNT 4
 
-struct mmaped_buffer {
-    void *start;
-    size_t length;
-};
-
 static int xioctl(int fd, int request, void *arg) {
     int ret;
     do {
@@ -29,164 +24,63 @@ static int xioctl(int fd, int request, void *arg) {
     return ret;
 }
 
-/**
- * pixel_format_valid - returns a non-zero value if the pixel format is valid
- */
-static int pixel_format_valid(int fd, uint32_t pixel_format) {
+static void print_pixel_formats(int fd) {
     // Check to see if they've selected a valid pixel format
     struct v4l2_fmtdesc *format = NULL;
 
-    int fmt_cnt = enum_formats(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &format);
+    int fmt_cnt = enum_pixel_formats(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &format);
     if (fmt_cnt < -1) {
         fprintf(stderr, "Unable to enumerate video capture formats\n");
-        return 0;
+        return;
     }
 
-    int valid = 0;
-    for (int i = 0; !valid && (i < fmt_cnt); i++) {
-        if (format[i].pixelformat == pixel_format) {
-            valid = 1;
-        }
-    }
-
-    if (!valid) {
-        fprintf(stdout, "No/invalid pixel format specified! Please select from the following:\n");
-        for (int i = 0; i < fmt_cnt; i++) {
-            fprintf(stdout, "%s\n", pix_fmt_to_str(format[i].pixelformat));
-        }
+    fprintf(stdout, "No/invalid pixel format specified! Please select from the following:\n");
+    for (int i = 0; i < fmt_cnt; i++) {
+        fprintf(stdout, "%s\n", pix_fmt_to_str(format[i].pixelformat));
     }
 
     free(format);
     format = NULL;
-
-    return valid;
 }
 
-static int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
-    // Check to see if the frame size is valid for the given pixel format
+static void print_frame_sizes(int fd, uint32_t pixel_format) {
     struct v4l2_frmsizeenum *fsze = NULL;
     int frm_sz_cnt = enum_frame_size(fd, pixel_format, &fsze);
     if (frm_sz_cnt < 0) {
         perror("Error enumerating frame sizes for pixel format");
-        return 0;
+        return;
     }
 
-    int valid = 0;
-    for (int i = 0; !valid && (i < frm_sz_cnt); i++) {
-        if (fsze[i].type == V4L2_FRMSIZE_TYPE_DISCRETE) {
-            if (width == fsze[i].discrete.width && height == fsze[i].discrete.height) {
-                valid = 1;
-            }
-        } else {
-            int cur_width = fsze[i].stepwise.min_width;
-            int cur_height = fsze[i].stepwise.min_height;
-            while (!valid && (cur_width < fsze[i].stepwise.max_width) && (cur_height < fsze[i].stepwise.max_height)) {
-                if (cur_width == width && cur_height == height) {
-                    valid = 1;
-                }
+    fprintf(stdout, "Not all/invalid frame sizes specified! Please select from the following:\n");
 
-                cur_width += fsze[i].stepwise.step_width;
-                cur_height += fsze[i].stepwise.step_height;
-            }
-        }
-    }
-
-    if (!valid) {
-        fprintf(stdout, "Not all/invalid frame size dimensions specified! Please select from the following:\n");
-
-        for (int i = 0; i < frm_sz_cnt; i++) {
-            if (fsze[i].type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+    for (int i = 0; i < frm_sz_cnt; i++) {
+        switch(fsze[i].type) {
+            case V4L2_FRMSIZE_TYPE_DISCRETE:
                 fprintf(stdout, "%dx%d\n", fsze[i].discrete.width, fsze[i].discrete.height);
-            } else {
+                break;
+
+            case V4L2_FRMSIZE_TYPE_STEPWISE:
                 fprintf(stdout, "From %dx%d to %dx%d by %dx%d\n",
                         fsze[i].stepwise.min_width, fsze[i].stepwise.min_height,
                         fsze[i].stepwise.max_width, fsze[i].stepwise.max_height,
                         fsze[i].stepwise.step_width, fsze[i].stepwise.step_height);
-            }
+                break;
+                
+            case V4L2_FRMSIZE_TYPE_CONTINUOUS:
+                fprintf(stdout, "Any dimension between %dx%d and %dx%d\n",
+                        fsze[i].stepwise.min_width, fsze[i].stepwise.min_height,
+                        fsze[i].stepwise.max_width, fsze[i].stepwise.max_height);
+                break;
+
+            default:
+                fprintf(stdout, "Unable to show frame formats, this program does not know how to "
+                        "utilize this device. Got V4L2_FRMSIZE_TYPE: %d\n", fsze[i].type);
+                break;
         }
     }
 
     free(fsze);
     fsze = NULL;
-
-    return valid;
-}
-
-static int set_stream_format(int fd, int width, int height, uint32_t pixel_format) {
-    struct v4l2_format fmt = {0};
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = width;
-    fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = pixel_format;
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
-
-    return xioctl(fd, VIDIOC_S_FMT, &fmt);
-}
-
-static int init_mmap_buffers(int fd, struct mmaped_buffer *bufs, int count) {
-    struct v4l2_requestbuffers req = {0};
-    req.count = count;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
-
-    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req)) {
-        return -1;
-    }
-
-    struct v4l2_buffer buf;
-    for (int i = 0; i < count; i++) {
-        memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        if (-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf)) {
-            return -1;
-        }
-
-        bufs[i].length = buf.length;
-        bufs[i].start = mmap(NULL, buf.length, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, buf.m.offset);
-        if (MAP_FAILED == bufs[i].start) {
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-static int start_streaming(int fd, int buf_count) {
-    struct v4l2_buffer buf;
-
-    for (int i = 0; i < buf_count; i++) {
-        memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-
-        fprintf(stdout, "Starting stream for buf %d\n", i);
-        if (-1 == xioctl(fd, VIDIOC_QBUF, &buf)) {
-            return -1;
-        }
-    }
-
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    return xioctl(fd, VIDIOC_STREAMON, &type);
-}
-
-static int stop_streaming(int fd) {
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    return xioctl(fd, VIDIOC_STREAMOFF, &type);
-}
-
-static int read_frame(int fd, struct v4l2_buffer *buf) {
-    memset (buf, 0, sizeof(struct v4l2_buffer));
-    buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf->memory = V4L2_MEMORY_MMAP;
-
-    return xioctl(fd, VIDIOC_DQBUF, buf);
-}
-
-static int enqueue_frame(int fd, struct v4l2_buffer *buf) {
-    return xioctl(fd, VIDIOC_QBUF, buf);
 }
 
 void print_usage(const char *argv0) {
@@ -340,15 +234,15 @@ int main(int argc, char *argv[]) {
     }
 
     char driver[sizeof(caps.driver) + 1] = {'\0'};
-    memcpy(caps.driver, driver, sizeof(caps.driver));
+    memcpy(driver, caps.driver, sizeof(caps.driver));
     fprintf(stdout, "Driver= \"%s\"\n", driver);
 
     char card[sizeof(caps.card) + 1] = {'\0'};
-    memcpy(caps.card, card, sizeof(caps.card));
+    memcpy(card, caps.card, sizeof(caps.card));
     fprintf(stdout, "Card = \"%s\"\n", card);
 
     char bus_info[sizeof(caps.bus_info) + 1] = {'\0'};
-    memcpy(caps.bus_info, bus_info, sizeof(caps.bus_info));
+    memcpy(bus_info, caps.bus_info, sizeof(caps.bus_info));
     fprintf(stdout, "Bus info = \"%s\"\n", bus_info);
 
     fprintf(stdout, "V4L2 driver version = %d\n", caps.version);
@@ -366,16 +260,26 @@ int main(int argc, char *argv[]) {
         goto fail;
     }
 
-    if (!pixel_format_valid(fd, pixel_format)) {
+    if (!pixel_format_valid(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, pixel_format)) {
+        print_pixel_formats(fd);
         goto fail;
     }
 
     if (!frame_size_valid(fd, pixel_format, width, height)) {
+        print_frame_sizes(fd, pixel_format);
         goto fail;
     }
 
     fprintf(stdout, "Setting stream format\n");
-    if (set_stream_format(fd, width, height, pixel_format) != 0) {
+
+    struct v4l2_format fmt = {0};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = width;
+    fmt.fmt.pix.height = height;
+    fmt.fmt.pix.pixelformat = pixel_format;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+    if (set_stream_format(fd, &fmt) != 0) {
         perror("Error setting format");
         ret = -1;
         goto fail;
@@ -393,7 +297,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Start streaming!
-    if (-1 == start_streaming(fd, BUFFER_COUNT)) {
+    if (-1 == start_mmap_streaming(fd, BUFFER_COUNT)) {
         perror("Error starting stream");
         ret = -1;
         goto fail;
