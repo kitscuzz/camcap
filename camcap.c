@@ -16,14 +16,6 @@
 
 #define BUFFER_COUNT 4
 
-static int xioctl(int fd, int request, void *arg) {
-    int ret;
-    do {
-        ret = ioctl(fd, request, arg);
-    } while(ret == -1 && errno == EINTR);
-    return ret;
-}
-
 static void print_pixel_formats(int fd) {
     // Check to see if they've selected a valid pixel format
     struct v4l2_fmtdesc *format = NULL;
@@ -227,7 +219,7 @@ int main(int argc, char *argv[]) {
     }
 
     struct v4l2_capability caps;
-    if (xioctl(fd, VIDIOC_QUERYCAP, &caps) < 0) {
+    if (get_device_capabilities(fd, &caps) < 0) {
         perror("Error querying capabilities");
         ret = -1;
         goto fail;

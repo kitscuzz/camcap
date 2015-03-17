@@ -63,6 +63,18 @@ void print_capabilities(uint32_t caps) {
 }
 
 /**
+ * get_device_capabilities - query the driver for its capabilities
+ */
+int get_device_capabilities(int fd, struct v4l2_capability *caps) {
+    if (fd < 0 || caps == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return xioctl(fd, VIDIOC_QUERYCAP, caps);
+}
+
+/**
  * get_nth_format - get format at index n, store it in "format"
  */
 static int get_nth_format (int fd, enum v4l2_buf_type type, int n, struct v4l2_fmtdesc *format) {
@@ -128,7 +140,13 @@ int enum_pixel_formats(int fd, enum v4l2_buf_type type, struct v4l2_fmtdesc **fo
  * pixel_format_valid - returns a non-zero value if the pixel format is valid
  */
 int pixel_format_valid(int fd, enum v4l2_buf_type type, uint32_t pixel_format) {
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     struct v4l2_fmtdesc fmt = {0};
+
     for(int i = 0; -1 != get_nth_format(fd, type, i, &fmt); i++) {
         if (fmt.pixelformat == pixel_format) {
             return 1;
@@ -162,7 +180,7 @@ static int get_framesize_count(int fd, int pixel_format) {
  * enum_frame_sizes - allocate space for a 
  */
 int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_enum) {
-    if (frm_sz_enum == NULL) {
+    if (fd < 0 || frm_sz_enum == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -195,6 +213,11 @@ int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_e
  * frame_size_valid - returns a non-zero value if the frame size is valid
  */
 int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     // Check to see if the frame size is valid for the given pixel format
     struct v4l2_frmsizeenum fsze = {0};
 
@@ -240,6 +263,11 @@ int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
  * set_stream_format - apply a given format to a given device
  */
 int set_stream_format(int fd, struct v4l2_format *fmt) {
+    if (fd < 0 || fmt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
     return xioctl(fd, VIDIOC_S_FMT, fmt);
 }
 
@@ -247,6 +275,11 @@ int set_stream_format(int fd, struct v4l2_format *fmt) {
  * init_mmap_buffers - get a set of mmaped buffers related between the driver and the program
  */
 int init_mmap_buffers(int fd, struct mmaped_buffer *bufs, int count) {
+    if (fd < 0 || bufs == NULL || count < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     struct v4l2_requestbuffers req = {0};
     req.count = count;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -280,6 +313,11 @@ int init_mmap_buffers(int fd, struct mmaped_buffer *bufs, int count) {
  * start_mmap_streaming - queue all buffers and tell the driver to start
  */
 int start_mmap_streaming(int fd, int buf_count) {
+    if (fd < 0 || buf_count < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     struct v4l2_buffer buf;
 
     for (int i = 0; i < buf_count; i++) {
@@ -301,6 +339,11 @@ int start_mmap_streaming(int fd, int buf_count) {
  * stop_streaming - tell the driver to stop streaming
  */
 int stop_streaming(int fd) {
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     return xioctl(fd, VIDIOC_STREAMOFF, &type);
 }
@@ -309,6 +352,11 @@ int stop_streaming(int fd) {
  * read_frame - after sucessfully returning from a select, get the data from the buffer
  */
 int read_frame(int fd, struct v4l2_buffer *buf) {
+    if (fd < 0 || buf == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
     memset (buf, 0, sizeof(struct v4l2_buffer));
     buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf->memory = V4L2_MEMORY_MMAP;
@@ -320,6 +368,11 @@ int read_frame(int fd, struct v4l2_buffer *buf) {
  * enqueue_frame - tell the driver the buffer is ready to accept another frame
  */
 int enqueue_frame(int fd, struct v4l2_buffer *buf) {
+    if (fd < 0 || buf == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
     return xioctl(fd, VIDIOC_QBUF, buf);
 }
 
