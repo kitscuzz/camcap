@@ -212,7 +212,7 @@ int enum_frame_size(int fd, int pixel_format, struct v4l2_frmsizeenum **frm_sz_e
 /**
  * frame_size_valid - returns a non-zero value if the frame size is valid
  */
-int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
+int frame_size_valid(int fd, uint32_t pixel_format, uint32_t width, uint32_t height) {
     if (fd < 0) {
         errno = EINVAL;
         return -1;
@@ -221,7 +221,7 @@ int frame_size_valid(int fd, uint32_t pixel_format, int width, int height) {
     // Check to see if the frame size is valid for the given pixel format
     struct v4l2_frmsizeenum fsze = {0};
 
-    int cur_width, cur_height;
+    uint32_t cur_width, cur_height;
     for (int i = 0; -1 != get_nth_frame_size(fd, pixel_format, i, &fsze) ; i++) {
         switch(fsze.type) {
             case V4L2_FRMSIZE_TYPE_DISCRETE:

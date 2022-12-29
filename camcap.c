@@ -101,6 +101,7 @@ int main(int argc, char *argv[]) {
 
     const char *dev_name = NULL;
     const char *out_name = NULL;
+    FILE *out = NULL;
     uint32_t pixel_format = 0;
     int width = 0, height = 0;
     int frame_count = 1;
@@ -208,7 +209,6 @@ int main(int argc, char *argv[]) {
         goto fail;
     }
 
-    FILE *out = NULL;
     if (out_name != NULL) {
         out = fopen(out_name, "w");
         if (out == NULL) {

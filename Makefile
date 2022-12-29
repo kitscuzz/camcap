@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-std=c99 -Wall -Werror -g
+CFLAGS=-std=gnu99 -Wall -Wextra -Werror -g -O2
 
 all: camcap
 
